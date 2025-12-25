@@ -1,2 +1,6 @@
 .venv
 build
+dist
+eyecare.log
+settings.json
+temp_reminder.html

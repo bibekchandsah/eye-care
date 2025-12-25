@@ -5,7 +5,7 @@ a = Analysis(
     ['EyeCare.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('eyecare.ico', '.'), ('index.html', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
