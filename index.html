@@ -288,24 +288,28 @@
         .context-menu {
             position: fixed;
             background: white;
-            border: 1px solid #ccc;
+            border: 2px solid #333;
             border-radius: 5px;
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
             display: none;
-            z-index: 10000;
+            z-index: 999999;
             min-width: 120px;
+            pointer-events: auto;
         }
 
         .context-menu-item {
-            padding: 10px 20px;
+            padding: 12px 24px;
             cursor: pointer;
             color: #333;
-            font-size: 14px;
+            font-size: 16px;
+            font-weight: bold;
             font-family: Arial, sans-serif;
+            user-select: none;
         }
 
         .context-menu-item:hover {
-            background: #f0f0f0;
+            background: #e0e0e0;
+            color: #000;
         }
     </style>
 </head>
@@ -360,55 +364,65 @@
 
         // Close window function using pywebview API
         function closeWindow() {
+            console.log('closeWindow called');
             if (document.fullscreenElement) {
                 document.exitFullscreen();
             }
             // Try pywebview API first, then fallback to window.close
             if (window.pywebview && window.pywebview.api) {
+                console.log('Using pywebview.api.close_window()');
                 window.pywebview.api.close_window();
             } else {
+                console.log('Fallback to window.close()');
                 window.close();
             }
         }
-
+        
         // Exit on any key press
-        document.addEventListener('keydown', function() {
-            closeWindow();
-        });
+        // document.addEventListener('keydown', function() {
+        //     closeWindow();
+        // });
 
         // Show custom context menu on right-click
         const contextMenu = document.getElementById('contextMenu');
+        console.log('Context menu element:', contextMenu);
+        
+        // Ensure context menu starts hidden
+        if (contextMenu) {
+            contextMenu.style.display = 'none';
+        }
         
         document.addEventListener('contextmenu', function(e) {
+            console.log('Right-click detected at:', e.pageX, e.pageY);
             e.preventDefault();
+            e.stopPropagation();
             
             // Show context menu at cursor position
-            contextMenu.style.display = 'block';
-            contextMenu.style.left = e.pageX + 'px';
-            contextMenu.style.top = e.pageY + 'px';
+            if (contextMenu) {
+                contextMenu.style.display = 'block';
+                contextMenu.style.left = e.pageX + 'px';
+                contextMenu.style.top = e.pageY + 'px';
+                console.log('Context menu displayed');
+            } else {
+                console.error('Context menu element not found');
+            }
+            
+            return false;
         });
 
-        // Handle clicks
+        // Handle clicks - only to hide context menu, not close window
         document.addEventListener('click', function(e) {
             // If clicking on context menu item, let it handle the close
             if (e.target.closest('.context-menu-item')) {
+                console.log('Context menu item clicked');
+                closeWindow();
                 return;
             }
             
-            // If clicking on context menu, just hide it
-            if (e.target.closest('.context-menu')) {
+            // Hide context menu if it's visible
+            if (contextMenu && contextMenu.style.display === 'block') {
                 contextMenu.style.display = 'none';
-                return;
             }
-            
-            // If context menu is visible, hide it first
-            if (contextMenu.style.display === 'block') {
-                contextMenu.style.display = 'none';
-                return;
-            }
-            
-            // Otherwise, close the window
-            closeWindow();
         });
     </script>
 </body>

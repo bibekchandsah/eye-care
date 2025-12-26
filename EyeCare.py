@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import simpledialog
+from tkinter import simpledialog, messagebox
 import time
 from threading import Thread
 from pystray import Icon, Menu, MenuItem
@@ -13,6 +13,15 @@ import webview
 import ctypes
 import logging
 from datetime import datetime
+import urllib.request
+import urllib.error
+import subprocess
+
+# Version
+CURRENT_VERSION = "v1.0.2"
+GITHUB_RELEASES_URL = "https://github.com/bibekchandsah/eye-care/releases"
+GITHUB_NEW_RELEASES_URL = "https://github.com/bibekchandsah/eye-care/releases/latest"
+GITHUB_API_URL = "https://api.github.com/repos/bibekchandsah/eye-care/releases/latest"
 
 # Setup paths
 def get_app_path():
@@ -113,6 +122,8 @@ selected_interval = "1 minute"
 is_paused = False
 auto_start_enabled = False
 reminder_message = default_message
+timer_id = None  # Track the scheduled timer
+# update_notification_shown = False  # Track if update notification was already shown this session
 
 # Settings file path
 settings_file = os.path.join(get_app_path(), "settings.json")
@@ -174,6 +185,7 @@ def show_message():
         return
     
     def show_html_window():
+        global timer_id
         logger.info("show_html_window() starting")
         # Create a temporary HTML file with the custom message and countdown
         html_path = os.path.join(get_resource_path(), "index.html")
@@ -273,15 +285,19 @@ def show_message():
             except Exception as e:
                 logger.warning(f"Could not remove temp file: {e}")
             
-            # Schedule next reminder after webview closes
+            # Schedule next reminder
             logger.info(f"Scheduling next reminder in {interval_minutes} minutes")
-            root.after(interval_minutes * 60 * 1000, show_message)
+            if timer_id:
+                root.after_cancel(timer_id)
+            timer_id = root.after(interval_minutes * 60 * 1000, show_message)
                 
         except Exception as e:
-            logger.error(f"Error showing HTML reminder: {e}", exc_info=True)
-            print(f"Error showing HTML reminder: {e}")
+            logger.error(f"Error showing reminder: {e}", exc_info=True)
+            print(f"Error showing reminder: {e}")
             # Fallback to schedule next reminder
-            root.after(interval_minutes * 60 * 1000, show_message)
+            if timer_id:
+                root.after_cancel(timer_id)
+            timer_id = root.after(interval_minutes * 60 * 1000, show_message)
     
     # Schedule to run on main thread
     root.after(100, show_html_window)
@@ -304,9 +320,12 @@ def is_selected_interval(label):
     return selected_interval == label or (selected_interval.startswith("Custom") and label.startswith("Custom"))
 
 def start_timer():
-    global is_paused
+    global is_paused, timer_id
     is_paused = False
-    root.after(interval_minutes * 60 * 1000, show_message)
+    # Cancel any existing timer
+    if timer_id:
+        root.after_cancel(timer_id)
+    timer_id = root.after(interval_minutes * 60 * 1000, show_message)
 
 def pause_timer():
     global is_paused
@@ -314,6 +333,122 @@ def pause_timer():
 
 def open_developer_page():
     webbrowser.open("https://bibekchandsah.com.np/developer.html")
+
+def check_for_updates(show_no_update=False):
+    """Check GitHub for latest release version"""
+    logger.info("Checking for updates...")
+    try:
+        req = urllib.request.Request(GITHUB_API_URL)
+        req.add_header('User-Agent', 'EyeCare-App')
+        
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+            latest_version = data.get('tag_name', '')
+            
+            logger.info(f"Current version: {CURRENT_VERSION}, Latest version: {latest_version}")
+            
+            if latest_version and latest_version != CURRENT_VERSION:
+                # New version available
+                logger.info("New update available!")
+                show_update_notification(latest_version)
+            else:
+                logger.info("App is up to date")
+                if show_no_update:
+                    show_no_update_notification()
+    except urllib.error.URLError as e:
+        logger.warning(f"Could not check for updates (network error): {e}")
+        if show_no_update:
+            show_network_error()
+    except Exception as e:
+        logger.error(f"Error checking for updates: {e}")
+        if show_no_update:
+            show_network_error()
+
+def show_update_notification(latest_version):
+    """Show notification dialog about available update"""
+    # global update_notification_shown
+    
+    # Only show once per session
+    # if update_notification_shown:
+    #     logger.info("Update notification already shown this session, skipping")
+    #     return
+    
+    # update_notification_shown = True
+    
+    def show_dialog():
+        try:
+            dialog = tk.Toplevel(root)
+            dialog.title("Update Available")
+            dialog.transient(root)
+            dialog.grab_set()
+            
+            # Center the dialog
+            center_window(dialog, 400, 200)
+            
+            # Set icon
+            icon_path = os.path.join(get_resource_path(), "eyecare.ico")
+            if os.path.exists(icon_path):
+                dialog.iconbitmap(icon_path)
+            
+            dialog.attributes('-topmost', True)
+            
+            # Message
+            message = f"A new version ({latest_version}) is available!\n\nYou are currently using {CURRENT_VERSION}.\n\nWould you like to download the update?"
+            label = tk.Label(dialog, text=message, font=("Arial", 10), justify=tk.LEFT, wraplength=350)
+            label.pack(pady=20, padx=20)
+            
+            # Buttons
+            button_frame = tk.Frame(dialog)
+            button_frame.pack(pady=10)
+            
+            def download_update():
+                webbrowser.open(GITHUB_NEW_RELEASES_URL)
+                dialog.destroy()
+            
+            download_btn = tk.Button(button_frame, text="Download", command=download_update, width=12)
+            download_btn.pack(side=tk.LEFT, padx=5)
+            
+            later_btn = tk.Button(button_frame, text="Later", command=dialog.destroy, width=12)
+            later_btn.pack(side=tk.LEFT, padx=5)
+            
+        except Exception as e:
+            logger.error(f"Error showing update notification: {e}")
+    
+    root.after(0, show_dialog)
+
+def show_no_update_notification():
+    """Show message that app is up to date"""
+    def show_dialog():
+        try:
+            messagebox.showinfo(
+                "No Updates",
+                f"You are using the latest version ({CURRENT_VERSION})."
+            )
+        except Exception as e:
+            logger.error(f"Error showing no update dialog: {e}")
+    
+    root.after(0, show_dialog)
+
+def show_network_error():
+    """Show error message when update check fails"""
+    def show_dialog():
+        try:
+            messagebox.showerror(
+                "Update Check Failed",
+                "Could not check for updates.\nPlease check your internet connection."
+            )
+        except Exception as e:
+            logger.error(f"Error showing network error dialog: {e}")
+    
+    root.after(0, show_dialog)
+
+def check_updates_manually():
+    """Manually trigger update check (shows result regardless)"""
+    Thread(target=lambda: check_for_updates(show_no_update=True), daemon=True).start()
+
+def check_updates_on_startup():
+    """Check for updates on startup (silent if no update)"""
+    Thread(target=lambda: check_for_updates(show_no_update=False), daemon=True).start()
 
 def enable_auto_start():
     try:
@@ -425,6 +560,13 @@ def set_custom_message():
 
 def test_reminder():
     """Test function to show reminder immediately without waiting"""
+    global timer_id
+    # Cancel the current scheduled timer to prevent double triggers
+    if timer_id:
+        root.after_cancel(timer_id)
+        timer_id = None
+        logger.info("Cancelled existing timer for test reminder")
+    # Show reminder immediately
     show_message()
 
 def restore_defaults():
@@ -464,6 +606,7 @@ def setup_tray_icon():
         MenuItem("Restore Default", restore_defaults),
         Menu.SEPARATOR,
         MenuItem("Test Reminder", test_reminder),
+        MenuItem("Check for Update", check_updates_manually),
         MenuItem("Developer", open_developer_page),
         MenuItem("Restart", lambda icon, item: restart_app(icon, item)),
         MenuItem("Quit", lambda icon, item: quit_app(icon, item))
@@ -506,6 +649,10 @@ root.withdraw()
 
 # Load saved settings
 load_settings()
+
+# Check for updates on startup
+logger.info(f"Current version: {CURRENT_VERSION}")
+check_updates_on_startup()
 
 # Start the tray icon
 run_tray_icon()

@@ -1,7 +1,15 @@
 user customize message
 user customize time interval too
 alwaays on top of others app so that user get notification
+only right click >  close should close the screen meaasage window
+
+new releases "https://github.com/bibekchandsah/eye-care/releases"
+auto check update and show notification for update
+33:02, 34:02-34:24, 35:02-35:24 | 36:40-37:00, 37:40-38:00
 
 pyinstaller --onefile --windowed --icon=eyecare.ico --add-data "eyecare.ico;." --add-data "index.html;." --name "EyeCare" EyeCare.py
 pyinstaller --onefile --windowed --icon=eyecare.ico --add-data "eyecare.ico;." --add-data "index.html;." --add-data "settings.json;." --name "EyeCare" EyeCare.py
 pyinstaller --onefile --windowed --icon=eyecare.ico --add-data "eyecare.ico;." --add-data "index.html;." --upx-dir=C:/manual/upx EyeCare.py
+
+PyInstaller EyeCare.spec --clean
+pyinstaller EyeCare.spec --clean --noconfirm
