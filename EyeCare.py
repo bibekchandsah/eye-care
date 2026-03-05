@@ -1,7 +1,7 @@
 import tkinter as tk
 from tkinter import simpledialog, messagebox
 import time
-from threading import Thread
+from threading import Thread, Timer, Event
 from pystray import Icon, Menu, MenuItem
 from PIL import Image, ImageDraw
 import webbrowser
@@ -9,16 +9,16 @@ import os
 import sys
 import winreg
 import json
-import webview
 import ctypes
 import logging
 from datetime import datetime
 import urllib.request
 import urllib.error
 import subprocess
+import queue
 
 # Version
-CURRENT_VERSION = "v1.0.2"
+CURRENT_VERSION = "v1.0.3"
 GITHUB_RELEASES_URL = "https://github.com/bibekchandsah/eye-care/releases"
 GITHUB_NEW_RELEASES_URL = "https://github.com/bibekchandsah/eye-care/releases/latest"
 GITHUB_API_URL = "https://api.github.com/repos/bibekchandsah/eye-care/releases/latest"
@@ -122,8 +122,17 @@ selected_interval = "1 minute"
 is_paused = False
 auto_start_enabled = False
 reminder_message = default_message
-timer_id = None  # Track the scheduled timer
+current_timer = None  # Track the scheduled Timer object
+app_running = True  # Flag to control main loop
+
+# Schedule settings
+schedule_enabled = False
+schedule_start = "09:00"   # HH:MM 24-hour
+schedule_end = "18:00"
 # update_notification_shown = False  # Track if update notification was already shown this session
+
+# Queue for cross-thread communication - functions to run on main thread
+main_thread_queue = queue.Queue()
 
 # Settings file path
 settings_file = os.path.join(get_app_path(), "settings.json")
@@ -131,6 +140,7 @@ logger.info(f"Settings file: {settings_file}")
 
 def load_settings():
     global interval_minutes, selected_interval, reminder_message
+    global schedule_enabled, schedule_start, schedule_end
     logger.info("Loading settings...")
     try:
         if os.path.exists(settings_file):
@@ -142,6 +152,10 @@ def load_settings():
                 # If reminder message is empty, use default
                 if not reminder_message or reminder_message.strip() == '':
                     reminder_message = default_message
+                # Schedule settings
+                schedule_enabled = settings.get('schedule_enabled', False)
+                schedule_start = settings.get('schedule_start', '09:00')
+                schedule_end = settings.get('schedule_end', '18:00')
                 # Apply auto start setting from JSON
                 auto_start_saved = settings.get('auto_start', False)
                 if auto_start_saved and not is_auto_start_enabled():
@@ -162,7 +176,10 @@ def save_settings():
             'interval_minutes': interval_minutes,
             'selected_interval': selected_interval,
             'reminder_message': reminder_message,
-            'auto_start': is_auto_start_enabled()
+            'auto_start': is_auto_start_enabled(),
+            'schedule_enabled': schedule_enabled,
+            'schedule_start': schedule_start,
+            'schedule_end': schedule_end
         }
         with open(settings_file, 'w') as f:
             json.dump(settings, f, indent=4)
@@ -178,129 +195,111 @@ def center_window(window, width, height):
     y = (screen_height - height) // 2
     window.geometry(f"{width}x{height}+{x}+{y}")
 
+def is_within_schedule():
+    """Return True if reminders should fire right now based on the schedule."""
+    if not schedule_enabled:
+        return True
+    now = datetime.now().strftime("%H:%M")
+    if schedule_start <= schedule_end:
+        # Same-day range e.g. 09:00 – 18:00
+        return schedule_start <= now <= schedule_end
+    else:
+        # Overnight range e.g. 22:00 – 06:00
+        return now >= schedule_start or now <= schedule_end
+
 def show_message():
     logger.info("show_message() called")
     if is_paused:
         logger.info("Timer is paused, skipping reminder")
+        schedule_next_reminder()
         return
+
+    if not is_within_schedule():
+        logger.info(f"Outside schedule ({schedule_start}–{schedule_end}), skipping reminder")
+        schedule_next_reminder()
+        return
+
+    # Queue the webview to run on main thread
+    main_thread_queue.put(("show_reminder", None))
+    logger.info("Reminder queued for main thread")
+
+def show_webview_reminder():
+    """Show the webview reminder in a separate process to avoid blocking"""
+    logger.info("show_webview_reminder() launching subprocess")
+    html_path = os.path.join(get_resource_path(), "index.html")
+    logger.info(f"HTML path: {html_path}")
     
-    def show_html_window():
-        global timer_id
-        logger.info("show_html_window() starting")
-        # Create a temporary HTML file with the custom message and countdown
-        html_path = os.path.join(get_resource_path(), "index.html")
-        logger.info(f"HTML path: {html_path}")
+    try:
+        if not os.path.exists(html_path):
+            logger.error(f"index.html not found at: {html_path}")
+            schedule_next_reminder()
+            return
+            
+        with open(html_path, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+        logger.info("HTML file read successfully")
         
-        # Read the original HTML file
-        try:
-            if not os.path.exists(html_path):
-                logger.error(f"index.html not found at: {html_path}")
-                root.after(interval_minutes * 60 * 1000, show_message)
-                return
-                
-            with open(html_path, 'r', encoding='utf-8') as f:
-                html_content = f.read()
-            logger.info("HTML file read successfully")
-            
-            # Replace the message placeholder with the custom message
-            html_content = html_content.replace(
-                '{{REMINDER_MESSAGE}}',
-                reminder_message
+        # Replace the message placeholder with the custom message
+        html_content = html_content.replace(
+            '{{REMINDER_MESSAGE}}',
+            reminder_message
+        )
+        
+        # Create a temporary file with modified content
+        temp_html_path = os.path.join(get_app_path(), "temp_reminder.html")
+        with open(temp_html_path, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        logger.info(f"Temp HTML created: {temp_html_path}")
+        
+        # Get path to reminder_window.py
+        reminder_script = os.path.join(get_resource_path(), "reminder_window.py")
+        
+        # If frozen (exe), the script might be bundled
+        if getattr(sys, 'frozen', False):
+            # For frozen app, we need to run the bundled script differently
+            # Use pythonw to avoid console window, or python if pythonw not available
+            python_exe = sys.executable
+            # Launch as a separate process that won't block
+            if os.path.exists(reminder_script):
+                subprocess.Popen(
+                    [python_exe, reminder_script, temp_html_path],
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                )
+                logger.info("Reminder subprocess launched (frozen)")
+            else:
+                logger.error(f"Reminder script not found: {reminder_script}")
+        else:
+            # For development, run the script with python
+            python_exe = sys.executable
+            subprocess.Popen(
+                [python_exe, reminder_script, temp_html_path],
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
             )
+            logger.info("Reminder subprocess launched (dev)")
+        
+        # Schedule next reminder immediately (subprocess runs independently)
+        schedule_next_reminder()
             
-            # Create a temporary file with modified content
-            temp_html_path = os.path.join(get_app_path(), "temp_reminder.html")
-            with open(temp_html_path, 'w', encoding='utf-8') as f:
-                f.write(html_content)
-            logger.info(f"Temp HTML created: {temp_html_path}")
-            
-            # JavaScript API for closing the window
-            class Api:
-                def close_window(self):
-                    logger.info("close_window API called")
-                    try:
-                        for window in webview.windows:
-                            window.destroy()
-                    except Exception as e:
-                        logger.error(f"Error in close_window: {e}")
-            
-            api = Api()
-            
-            # Create and show webview window in fullscreen
-            logger.info("Creating webview window...")
-            window = webview.create_window(
-                'Eye Care Reminder',
-                temp_html_path,
-                fullscreen=True,
-                frameless=True,
-                on_top=True,
-                js_api=api
-            )
-            logger.info("Webview window created")
-            
-            # Function to bring window to front using Windows API
-            def bring_to_front():
-                time.sleep(0.5)
-                try:
-                    if webview.windows:
-                        webview.windows[0].on_top = True
-                        # Use Windows API to force foreground
-                        user32 = ctypes.windll.user32
-                        hwnd = user32.GetForegroundWindow()
-                        # Get all windows and find ours
-                        user32.keybd_event(0, 0, 0, 0)  # Simulate key press to allow SetForegroundWindow
-                        time.sleep(0.1)
-                        webview.windows[0].on_top = True
-                        logger.info("Window brought to front")
-                except Exception as e:
-                    logger.error(f"Error bringing window to front: {e}")
-            
-            # Auto-close after 20 seconds
-            def auto_close():
-                logger.info("Auto-close timer started (20 seconds)")
-                time.sleep(20)
-                try:
-                    for w in webview.windows:
-                        w.destroy()
-                    logger.info("Window auto-closed")
-                except Exception as e:
-                    logger.error(f"Error in auto-close: {e}")
-            
-            # Start threads
-            focus_thread = Thread(target=bring_to_front, daemon=True)
-            focus_thread.start()
-            
-            close_thread = Thread(target=auto_close, daemon=True)
-            close_thread.start()
-            
-            logger.info("Starting webview...")
-            webview.start()
-            logger.info("Webview closed")
-            
-            # Clean up temp file
-            try:
-                if os.path.exists(temp_html_path):
-                    os.remove(temp_html_path)
-                    logger.info("Temp file cleaned up")
-            except Exception as e:
-                logger.warning(f"Could not remove temp file: {e}")
-            
-            # Schedule next reminder
-            logger.info(f"Scheduling next reminder in {interval_minutes} minutes")
-            if timer_id:
-                root.after_cancel(timer_id)
-            timer_id = root.after(interval_minutes * 60 * 1000, show_message)
-                
-        except Exception as e:
-            logger.error(f"Error showing reminder: {e}", exc_info=True)
-            print(f"Error showing reminder: {e}")
-            # Fallback to schedule next reminder
-            if timer_id:
-                root.after_cancel(timer_id)
-            timer_id = root.after(interval_minutes * 60 * 1000, show_message)
+    except Exception as e:
+        logger.error(f"Error showing reminder: {e}", exc_info=True)
+        print(f"Error showing reminder: {e}")
+        schedule_next_reminder()
+
+def schedule_next_reminder():
+    """Schedule the next reminder using threading.Timer"""
+    global current_timer
     
-    # Schedule to run on main thread
-    root.after(100, show_html_window)
+    # Cancel any existing timer
+    if current_timer:
+        current_timer.cancel()
+        current_timer = None
+    
+    if not is_paused:
+        delay_seconds = interval_minutes * 60
+        logger.info(f"Scheduling next reminder in {interval_minutes} minutes ({delay_seconds} seconds)")
+        current_timer = Timer(delay_seconds, show_message)
+        current_timer.daemon = True
+        current_timer.start()
 
 def set_interval(minutes, label):
     global interval_minutes, selected_interval
@@ -320,16 +319,18 @@ def is_selected_interval(label):
     return selected_interval == label or (selected_interval.startswith("Custom") and label.startswith("Custom"))
 
 def start_timer():
-    global is_paused, timer_id
+    global is_paused
     is_paused = False
-    # Cancel any existing timer
-    if timer_id:
-        root.after_cancel(timer_id)
-    timer_id = root.after(interval_minutes * 60 * 1000, show_message)
+    schedule_next_reminder()
 
 def pause_timer():
-    global is_paused
+    global is_paused, current_timer
     is_paused = True
+    # Cancel the current timer
+    if current_timer:
+        current_timer.cancel()
+        current_timer = None
+        logger.info("Timer paused and cancelled")
 
 def open_developer_page():
     webbrowser.open("https://bibekchandsah.com.np/developer.html")
@@ -558,22 +559,116 @@ def show_custom_message_dialog():
 def set_custom_message():
     root.after(0, show_custom_message_dialog)
 
+def show_schedule_dialog():
+    global schedule_enabled, schedule_start, schedule_end
+    try:
+        dialog = tk.Toplevel(root)
+        dialog.title("Set Schedule")
+        dialog.transient(root)
+        dialog.grab_set()
+        center_window(dialog, 320, 240)
+
+        icon_path = os.path.join(get_resource_path(), "eyecare.ico")
+        if os.path.exists(icon_path):
+            dialog.iconbitmap(icon_path)
+
+        dialog.attributes('-topmost', True)
+        dialog.lift()
+        dialog.focus_force()
+
+        # Enable / disable checkbox
+        enabled_var = tk.BooleanVar(value=schedule_enabled)
+        tk.Checkbutton(dialog, text="Enable schedule", variable=enabled_var,
+                       font=("Arial", 10)).pack(pady=(15, 5))
+
+        # Parse saved times
+        try:
+            start_h, start_m = schedule_start.split(":")
+            end_h, end_m = schedule_end.split(":")
+        except Exception:
+            start_h, start_m = "09", "00"
+            end_h, end_m = "18", "00"
+
+        def make_time_row(parent, label_text, h_val, m_val):
+            frame = tk.Frame(parent)
+            frame.pack(pady=4)
+            tk.Label(frame, text=label_text, font=("Arial", 10),
+                     width=10, anchor='e').pack(side=tk.LEFT)
+            h_spin = tk.Spinbox(frame, from_=0, to=23, width=3, format="%02.0f",
+                                font=("Arial", 10), fg="black", bg="white")
+            h_spin.delete(0, tk.END)
+            h_spin.insert(0, h_val)
+            h_spin.pack(side=tk.LEFT, padx=(5, 0))
+            tk.Label(frame, text=":", font=("Arial", 10)).pack(side=tk.LEFT)
+            m_spin = tk.Spinbox(frame, from_=0, to=59, width=3, format="%02.0f",
+                                font=("Arial", 10), fg="black", bg="white")
+            m_spin.delete(0, tk.END)
+            m_spin.insert(0, m_val)
+            m_spin.pack(side=tk.LEFT)
+            return h_spin, m_spin
+
+        sh_spin, sm_spin = make_time_row(dialog, "Start time:", start_h, start_m)
+        eh_spin, em_spin = make_time_row(dialog, "End time:", end_h, end_m)
+
+        tk.Label(dialog, text="(24-hour format. Reminders only fire\nduring this window.)",
+                 font=("Arial", 8), fg="gray").pack(pady=(4, 0))
+
+        def on_ok():
+            global schedule_enabled, schedule_start, schedule_end
+            try:
+                sh = int(sh_spin.get()) % 24
+                sm = int(sm_spin.get()) % 60
+                eh = int(eh_spin.get()) % 24
+                em = int(em_spin.get()) % 60
+                schedule_start = f"{sh:02d}:{sm:02d}"
+                schedule_end = f"{eh:02d}:{em:02d}"
+                schedule_enabled = enabled_var.get()
+                save_settings()
+                logger.info(f"Schedule saved: enabled={schedule_enabled}, {schedule_start}–{schedule_end}")
+            except Exception as e:
+                logger.error(f"Error saving schedule: {e}")
+            dialog.destroy()
+
+        def on_cancel():
+            dialog.destroy()
+
+        btn_frame = tk.Frame(dialog)
+        btn_frame.pack(pady=10)
+        tk.Button(btn_frame, text="OK", command=on_ok, width=10).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="Cancel", command=on_cancel, width=10).pack(side=tk.LEFT, padx=5)
+
+        dialog.bind('<Return>', lambda e: on_ok())
+        dialog.bind('<Escape>', lambda e: on_cancel())
+
+    except Exception as e:
+        logger.error(f"Error showing schedule dialog: {e}")
+
+def set_schedule():
+    root.after(0, show_schedule_dialog)
+
 def test_reminder():
     """Test function to show reminder immediately without waiting"""
-    global timer_id
+    global current_timer
+    
     # Cancel the current scheduled timer to prevent double triggers
-    if timer_id:
-        root.after_cancel(timer_id)
-        timer_id = None
+    if current_timer:
+        current_timer.cancel()
+        current_timer = None
         logger.info("Cancelled existing timer for test reminder")
-    # Show reminder immediately
-    show_message()
+    
+    # Queue reminder to run on main thread
+    main_thread_queue.put(("show_reminder", None))
+    logger.info("Test reminder queued for main thread")
 
 def restore_defaults():
     global interval_minutes, selected_interval, reminder_message
+    global schedule_enabled, schedule_start, schedule_end
     interval_minutes = default_interval_minutes
     selected_interval = "20 minutes"
     reminder_message = default_message
+    schedule_enabled = False
+    schedule_start = "09:00"
+    schedule_end = "21:00"
     save_settings()
 
 def setup_tray_icon():
@@ -603,6 +698,7 @@ def setup_tray_icon():
         MenuItem('Auto Start', toggle_auto_start, checked=lambda item: is_auto_start_enabled()),
         MenuItem("Message", set_custom_message),
         MenuItem("Reminder Interval", interval_menu),
+        MenuItem("Schedule", set_schedule, checked=lambda item: schedule_enabled),
         MenuItem("Restore Default", restore_defaults),
         Menu.SEPARATOR,
         MenuItem("Test Reminder", test_reminder),
@@ -615,7 +711,7 @@ def setup_tray_icon():
     icon.run()
 
 def run_tray_icon():
-    Thread(target=setup_tray_icon).start()
+    Thread(target=setup_tray_icon, daemon=True).start()
 
 def create_image():
     width = 64
@@ -627,13 +723,16 @@ def create_image():
     return image
 
 def restart_app(icon, item):
+    global app_running
+    app_running = False
     icon.stop()
-    root.quit()
     # Restart the application
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
 def quit_app(icon, item):
+    global app_running
     logger.info("Application shutting down...")
+    app_running = False
     try:
         icon.stop()
     except:
@@ -643,7 +742,7 @@ def quit_app(icon, item):
     except:
         pass
 
-# Set up the main Tkinter window
+# Set up the main Tkinter window (hidden, only for dialogs)
 root = tk.Tk()
 root.withdraw()
 
@@ -660,8 +759,23 @@ run_tray_icon()
 # Start the timer
 start_timer()
 
-# Start the Tkinter main loop with exception handling
+# Process queued commands on the main thread using tkinter's event loop
+def process_queue():
+    try:
+        command = main_thread_queue.get_nowait()
+        if command[0] == "show_reminder":
+            show_webview_reminder()
+    except queue.Empty:
+        pass
+    except Exception as e:
+        logger.error(f"Error processing queue: {e}", exc_info=True)
+    finally:
+        if app_running:
+            root.after(100, process_queue)
+
+logger.info("Application main loop starting...")
 try:
+    process_queue()
     root.mainloop()
 except KeyboardInterrupt:
     logger.info("Application interrupted by user (Ctrl+C)")
@@ -670,6 +784,9 @@ except Exception as e:
     logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
 finally:
     logger.info("Application closed")
+    # Cancel any pending timer
+    if current_timer:
+        current_timer.cancel()
     try:
         root.destroy()
     except:

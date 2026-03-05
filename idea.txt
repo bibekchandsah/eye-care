@@ -13,3 +13,19 @@ pyinstaller --onefile --windowed --icon=eyecare.ico --add-data "eyecare.ico;." -
 
 PyInstaller EyeCare.spec --clean
 pyinstaller EyeCare.spec --clean --noconfirm
+
+
+
+
+New "Schedule" menu item appears in the tray menu with a checkmark indicator when a schedule is active.
+How it works:
+    Click Schedule → opens a dialog with:
+    A checkbox to Enable schedule
+    Start time (HH : MM spinboxes, 24-hour)
+    End time (HH : MM spinboxes, 24-hour)
+    OK / Cancel buttons
+When enabled, reminders only fire if the current time falls within the window
+Supports overnight ranges too (e.g. 22:00 – 06:00)
+Settings are persisted to settings.json and restored on next launch
+Restore Default also resets the schedule (disabled, 09:00–18:00)
+The tray menu item shows a checkmark (✓) whenever the schedule is currently enabled
