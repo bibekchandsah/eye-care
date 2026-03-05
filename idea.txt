@@ -10,6 +10,7 @@ auto check update and show notification for update
 pyinstaller --onefile --windowed --icon=eyecare.ico --add-data "eyecare.ico;." --add-data "index.html;." --name "EyeCare" EyeCare.py
 pyinstaller --onefile --windowed --icon=eyecare.ico --add-data "eyecare.ico;." --add-data "index.html;." --add-data "settings.json;." --name "EyeCare" EyeCare.py
 pyinstaller --onefile --windowed --icon=eyecare.ico --add-data "eyecare.ico;." --add-data "index.html;." --upx-dir=C:/manual/upx EyeCare.py
+pyinstaller --onefile --windowed --icon=eyecare.ico --add-data "eyecare.ico;." --add-data "index.html;." --name "EyeCare" EyeCare.py
 
 PyInstaller EyeCare.spec --clean
 pyinstaller EyeCare.spec --clean --noconfirm
@@ -29,3 +30,4 @@ Supports overnight ranges too (e.g. 22:00 – 06:00)
 Settings are persisted to settings.json and restored on next launch
 Restore Default also resets the schedule (disabled, 09:00–18:00)
 The tray menu item shows a checkmark (✓) whenever the schedule is currently enabled
+

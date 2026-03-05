@@ -17,6 +17,48 @@ import urllib.error
 import subprocess
 import queue
 
+# ---------------------------------------------------------------------------
+# When the frozen exe is spawned as a reminder subprocess it receives
+# "--reminder <html_path>" and only shows the webview, then exits.
+# ---------------------------------------------------------------------------
+if len(sys.argv) >= 3 and sys.argv[1] == '--reminder':
+    import webview
+    _html_path = sys.argv[2]
+    if os.path.exists(_html_path):
+        class _Api:
+            def close_window(self):
+                try:
+                    for w in webview.windows:
+                        w.destroy()
+                except Exception:
+                    pass
+        _window = webview.create_window(
+            'Eye Care Reminder', _html_path,
+            fullscreen=True, frameless=True, on_top=True, js_api=_Api()
+        )
+        def _bring_to_front():
+            time.sleep(0.5)
+            try:
+                if webview.windows:
+                    webview.windows[0].on_top = True
+                    ctypes.windll.user32.keybd_event(0, 0, 0, 0)
+                    time.sleep(0.1)
+                    webview.windows[0].on_top = True
+            except Exception:
+                pass
+        def _auto_close():
+            time.sleep(20)
+            try:
+                for w in webview.windows:
+                    w.destroy()
+            except Exception:
+                pass
+        from threading import Thread as _Thread
+        _Thread(target=_bring_to_front, daemon=True).start()
+        _Thread(target=_auto_close, daemon=True).start()
+        webview.start(gui='edgechromium')
+    sys.exit(0)
+
 # Version
 CURRENT_VERSION = "v1.0.3"
 GITHUB_RELEASES_URL = "https://github.com/bibekchandsah/eye-care/releases"
@@ -251,28 +293,20 @@ def show_webview_reminder():
             f.write(html_content)
         logger.info(f"Temp HTML created: {temp_html_path}")
         
-        # Get path to reminder_window.py
-        reminder_script = os.path.join(get_resource_path(), "reminder_window.py")
-        
-        # If frozen (exe), the script might be bundled
         if getattr(sys, 'frozen', False):
-            # For frozen app, we need to run the bundled script differently
-            # Use pythonw to avoid console window, or python if pythonw not available
-            python_exe = sys.executable
-            # Launch as a separate process that won't block
-            if os.path.exists(reminder_script):
-                subprocess.Popen(
-                    [python_exe, reminder_script, temp_html_path],
-                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-                )
-                logger.info("Reminder subprocess launched (frozen)")
-            else:
-                logger.error(f"Reminder script not found: {reminder_script}")
-        else:
-            # For development, run the script with python
-            python_exe = sys.executable
+            # Frozen exe: re-launch ourselves with --reminder flag.
+            # No separate script needed – the exe handles it via the early-exit
+            # block at the top of this file.
             subprocess.Popen(
-                [python_exe, reminder_script, temp_html_path],
+                [sys.executable, '--reminder', temp_html_path],
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            )
+            logger.info("Reminder subprocess launched (frozen self)")
+        else:
+            # Development: run reminder_window.py with the current Python
+            reminder_script = os.path.join(get_resource_path(), "reminder_window.py")
+            subprocess.Popen(
+                [sys.executable, reminder_script, temp_html_path],
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
             )
             logger.info("Reminder subprocess launched (dev)")
